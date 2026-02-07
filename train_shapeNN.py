@@ -18,14 +18,36 @@ IMG_SIZE = 128
 DATASET_LEN = 30000
 LOSS_SCALE = 100.0 # Scaling loss to be in a more standard range
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+
 def train_unet():
     print(f"--- Starting Discriminative Training on {DEVICE} ---")
+    
+    # Generator needed for reproducibility with seed_worker
+    g = torch.Generator()
+    g.manual_seed(42)
 
     train_dataset = ShapeMatchingDatasetSimple(image_size=IMG_SIZE, length=DATASET_LEN)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True, 
+        num_workers=4,
+        worker_init_fn=seed_worker,
+        generator=g
+    )
 
     val_dataset = ShapeMatchingDatasetSimple(image_size=IMG_SIZE, length=2000)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False, 
+        num_workers=4,
+        worker_init_fn=seed_worker,
+        generator=g
+    )
 
     model = SiameseCorrelationUNet(n_channels=1).to(DEVICE)
     if os.path.exists("siamese_unet.pth"):
