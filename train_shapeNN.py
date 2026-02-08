@@ -8,11 +8,11 @@ import csv
 import time
 
 from shape_dataset import ShapeMatchingDatasetSimple
-from network import SiameseCorrelationUNet
+from network import SiameseUNet
 from generate_polygon_dataset import generate_heatmap_target
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 16          
+BATCH_SIZE = 32          
 LEARNING_RATE = 2e-4
 EPOCHS = 50
 IMG_SIZE = 128
@@ -104,7 +104,7 @@ def train_unet():
         worker_init_fn=seed_worker_test
     )
 
-    model = SiameseCorrelationUNet(n_channels=1).to(DEVICE)
+    model = SiameseUNet(n_channels=1).to(DEVICE)
     if os.path.exists("siamese_unet.pth"):
         print("Loading existing checkpoint...")
         try:
@@ -123,6 +123,8 @@ def train_unet():
         log_writer.writerow(["epoch", "train_loss", "train_eval_loss", "val_loss", "test_loss", "lr"])
 
     best_loss = float('inf')
+    patience_counter = 0
+    patience_limit = 5
 
     for epoch in range(EPOCHS):
         model.train()
@@ -165,15 +167,8 @@ def train_unet():
         # --- Evaluation Phase ---
         print(f"Evaluating Epoch {epoch+1}...")
         
-        # 1. Train Eval (Seen/Dynamic Distribution)
-        # We re-use train_loader but in eval mode (no grad). 
-        # Since it's random, this tests generalization to the "Training Distribution".
         train_eval_loss = evaluate(model, train_loader, DEVICE, "Train Eval")
-        
-        # 2. Validation (Fixed Seed 42)
         val_loss = evaluate(model, val_loader, DEVICE, "Validation")
-        
-        # 3. Test (Fixed Seed 12345)
         test_loss = evaluate(model, test_loader, DEVICE, "Test")
         
         current_lr = optimizer.param_groups[0]['lr']
@@ -186,8 +181,15 @@ def train_unet():
 
         if val_loss < best_loss:
             best_loss = val_loss
+            patience_counter = 0
             torch.save(model.state_dict(), "siamese_unet.pth")
             print(f"Saved Best Model (Val: {best_loss:.4f})")
+        else:
+            patience_counter += 1
+            print(f"No improvement. Patience: {patience_counter}/{patience_limit}")
+            if patience_counter >= patience_limit:
+                print("Early stopping triggered.")
+                break
 
     csv_file.close()
     print(f"--- Training Complete ---")

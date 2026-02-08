@@ -80,7 +80,7 @@ def predict_pose_search(model, template_tensor, query_tensor, device):
 
 def evaluate_model(num_samples=200):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SiameseCorrelationUNet(n_channels=1).to(device)
+    model = SiameseUNet(n_channels=1).to(device)
     
     if not os.path.exists(MODEL_PATH):
         print("Model not found.")

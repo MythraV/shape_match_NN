@@ -43,21 +43,26 @@ class Up(nn.Module):
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
-class SiameseCorrelationUNet(nn.Module):
+class SiameseUNet(nn.Module):
     def __init__(self, n_channels=1):
-        super(SiameseCorrelationUNet, self).__init__()
+        super(SiameseUNet, self).__init__()
         
-        # --- Shared Encoder ---
-        self.inc = DoubleConv(n_channels, 32)
-        self.down1 = Down(32, 64)
-        self.down2 = Down(64, 128)
-        self.down3 = Down(128, 256)
-        self.down4 = Down(256, 512) 
+        # --- Query Encoder ---
+        self.inc_q = DoubleConv(n_channels, 32)
+        self.down1_q = Down(32, 64)
+        self.down2_q = Down(64, 128)
+        self.down3_q = Down(128, 256)
+        self.down4_q = Down(256, 512) 
 
-        # --- Correlation & Fusion ---
-        # We'll use a 1x1 conv to reduce dimensions before correlation if needed,
-        # but let's try direct correlation first.
-        self.fusion_conv = DoubleConv(512 + 1, 512) 
+        # --- Template Encoder ---
+        self.inc_t = DoubleConv(n_channels, 16)
+        self.down1_t = Down(16, 32)
+        self.down2_t = Down(32, 64)
+        self.down3_t = Down(64, 128)
+        self.down4_t = Down(128, 256)
+
+        # --- Bottleneck ---
+        self.bottleneck_conv = DoubleConv(512 + 256, 512)
         
         # --- Decoder ---
         self.up1 = Up(512 + 256, 256) 
@@ -67,38 +72,25 @@ class SiameseCorrelationUNet(nn.Module):
         self.outc = nn.Conv2d(32, 1, kernel_size=1)
 
     def forward(self, template, query):
-        # 1. Shared Encoding
-        q1 = self.inc(query)
-        q2 = self.down1(q1)
-        q3 = self.down2(q2)
-        q4 = self.down3(q3)
-        q5 = self.down4(q4) # (B, 512, 8, 8)
-
-        t1 = self.inc(template)
-        t2 = self.down1(t1)
-        t3 = self.down2(t2)
-        t4 = self.down3(t3)
-        t5 = self.down4(t4) # (B, 512, 8, 8)
-
-        # 2. Depth-wise Correlation (Siamese style)
-        # We want to use t5 as a kernel for q5.
-        # Since it's a batch, we'll do it sample by sample or use grouped convolution.
-        B, C, H, W = q5.shape
+        # 1. Encode Query
+        q1 = self.inc_q(query)
+        q2 = self.down1_q(q1)
+        q3 = self.down2_q(q2)
+        q4 = self.down3_q(q3)
+        q5 = self.down4_q(q4) 
         
-        # Normalize features to get cosine similarity (optional but recommended)
-        q5_norm = F.normalize(q5, p=2, dim=1)
-        t5_norm = F.normalize(t5, p=2, dim=1)
+        # 2. Encode Template
+        t1 = self.inc_t(template)
+        t2 = self.down1_t(t1)
+        t3 = self.down2_t(t2)
+        t4 = self.down3_t(t3)
+        t5 = self.down4_t(t4) 
         
-        # Correlation: (B, 512, 8, 8) * (B, 512, 8, 8) -> (B, 1, 8, 8)
-        # We sum over the channel dimension to get a response map
-        correlation = torch.sum(q5_norm * t5_norm, dim=1, keepdim=True) # (B, 1, 8, 8)
-        
-        # 3. Fuse correlation back into query path
-        # Concat the similarity map with query features
-        fused = torch.cat([q5, correlation], dim=1)
-        bottleneck = self.fusion_conv(fused)
+        # 3. Fuse (Spatial Concatenation)
+        bottleneck = torch.cat([q5, t5], dim=1)
+        bottleneck = self.bottleneck_conv(bottleneck)
 
-        # 4. Decode
+        # 4. Decode Heatmap
         x = self.up1(bottleneck, q4)
         x = self.up2(x, q3)
         x = self.up3(x, q2)
