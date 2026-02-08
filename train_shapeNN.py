@@ -189,6 +189,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_data', type=str, default='train_data.pt', help='Path to training .pt file')
     parser.add_argument('--val_data', type=str, default='val_data.pt', help='Path to validation .pt file')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     args = parser.parse_args()
+    
+    # Update global config or pass it down. 
+    # Since BATCH_SIZE is global, we can update it here before calling train_unet, 
+    # or pass it as an arg. Passing it is cleaner but requires changing train_unet signature.
+    # Given the script structure, updating the global variable is the minimal change.
+    BATCH_SIZE = args.batch_size
     
     train_unet(args.train_data, args.val_data)
