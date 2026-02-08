@@ -6,6 +6,7 @@ import numpy as np
 import os
 import csv
 import time
+import datetime
 
 from shape_dataset import ShapeMatchingDatasetSimple
 from network import SiameseUNet
@@ -120,7 +121,7 @@ def train_unet():
     csv_file = open(log_file, "a", newline="")
     log_writer = csv.writer(csv_file)
     if not log_exists:
-        log_writer.writerow(["epoch", "train_loss", "train_eval_loss", "val_loss", "test_loss", "lr"])
+        log_writer.writerow(["timestamp", "epoch", "train_loss", "train_eval_loss", "val_loss", "test_loss", "lr"])
 
     best_loss = float('inf')
     patience_counter = 0
@@ -160,7 +161,8 @@ def train_unet():
             running_loss += loss.item()
             
             if batch_idx % 200 == 0 and batch_idx > 0:
-                print(f"E[{epoch+1}] Step[{batch_idx}] | Loss: {loss.item():.6f}")
+                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                print(f"[{timestamp}] E[{epoch+1}] Step[{batch_idx}] | Loss: {loss.item():.6f}")
 
         epoch_loss = running_loss / len(train_loader)
         
@@ -174,9 +176,10 @@ def train_unet():
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
         
-        print(f"==> Ep {epoch+1} | Train: {epoch_loss:.4f} | TrEval: {train_eval_loss:.4f} | Val: {val_loss:.4f} | Test: {test_loss:.4f} | LR: {current_lr:.2e}")
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{timestamp}] ==> Ep {epoch+1} | Train: {epoch_loss:.4f} | TrEval: {train_eval_loss:.4f} | Val: {val_loss:.4f} | Test: {test_loss:.4f} | LR: {current_lr:.2e}")
         
-        log_writer.writerow([epoch + 1, epoch_loss, train_eval_loss, val_loss, test_loss, current_lr])
+        log_writer.writerow([timestamp, epoch + 1, epoch_loss, train_eval_loss, val_loss, test_loss, current_lr])
         csv_file.flush()
 
         if val_loss < best_loss:
