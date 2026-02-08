@@ -57,8 +57,14 @@ class ShapeMatchingDatasetSimple(Dataset):
             # Aligned: Template is within +/- 5 deg of Query
             template_angle = query_angle + np.random.uniform(-5, 5)
         else:
-            # Misaligned: Template is > 10 deg away
-            offset = np.random.uniform(10, 180) * (1 if np.random.rand() > 0.5 else -1)
+            # Misaligned
+            # 30% chance of Hard Negative (180 deg +/- 20)
+            if np.random.rand() < 0.3:
+                offset = 180 + np.random.uniform(-20, 20)
+            else:
+                # Random negative
+                offset = np.random.uniform(10, 350)
+            
             template_angle = query_angle + offset
 
         # 4. Apply Transforms

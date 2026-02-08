@@ -28,7 +28,11 @@ def generate_single_sample(img_size):
     if is_match:
         template_angle = query_angle + np.random.uniform(-5, 5)
     else:
-        offset = np.random.uniform(10, 180) * (1 if np.random.rand() > 0.5 else -1)
+        # 30% Hard Negative
+        if np.random.rand() < 0.3:
+            offset = 180 + np.random.uniform(-20, 20)
+        else:
+            offset = np.random.uniform(10, 350)
         template_angle = query_angle + offset
 
     # 4. Transforms
