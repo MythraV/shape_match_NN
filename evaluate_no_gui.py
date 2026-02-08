@@ -5,6 +5,7 @@ from shape_dataset import ShapeMatchingDatasetSimple
 from network import SiameseUNet 
 import cv2
 import os
+import argparse
 
 MODEL_PATH = "siamese_unet.pth" 
 IMG_SIZE = 128
@@ -36,54 +37,88 @@ def find_peak_subpixel(heatmap):
     
     return cx, cy, max_val
 
-def predict_pose_search(model, template_tensor, query_tensor, device):
+def predict_pose_search(model, template_tensor, query_tensor, device, dense=False):
     """
-    Two-stage search for better accuracy.
+    Search strategy.
+    If dense=True: Searches 0..359 in 1 degree steps (Slow but accurate).
+    If dense=False: Coarse (10 deg) -> Fine (1 deg).
     """
-    # 1. Coarse Search (10 deg steps)
-    angles_coarse = np.arange(0, 360, 10)
-    
-    def get_scores(target_angles):
+    if dense:
+        # Full 360 search
+        angles = np.arange(0, 360, 1)
         batch_t = []
-        for a in target_angles:
-            batch_t.append(TF.rotate(template_tensor, -float(a), interpolation=TF.InterpolationMode.BILINEAR))
-        batch_t = torch.stack(batch_t).squeeze(1).to(device)
-        batch_q = query_tensor.repeat(len(target_angles), 1, 1, 1).to(device)
-        with torch.no_grad():
-            logits = model(batch_t, batch_q)
-            heatmaps = torch.sigmoid(logits)
-        scores = heatmaps.view(len(target_angles), -1).max(dim=1).values
-        return scores, heatmaps
+        chunk_size = 36
+        best_overall_score = -1.0
+        best_angle = 0
+        best_map_final = None
+        
+        for i in range(0, len(angles), chunk_size):
+            chunk_angles = angles[i:i+chunk_size]
+            batch_t = []
+            for a in chunk_angles:
+                batch_t.append(TF.rotate(template_tensor, -float(a), interpolation=TF.InterpolationMode.BILINEAR))
+            
+            batch_t = torch.stack(batch_t).squeeze(1).to(device)
+            batch_q = query_tensor.repeat(len(chunk_angles), 1, 1, 1).to(device)
+            
+            with torch.no_grad():
+                logits = model(batch_t, batch_q)
+                heatmaps = torch.sigmoid(logits)
+            
+            scores = heatmaps.view(len(chunk_angles), -1).max(dim=1).values
+            best_idx_chunk = torch.argmax(scores).item()
+            score = scores[best_idx_chunk].item()
+            
+            if score > best_overall_score:
+                best_overall_score = score
+                best_angle = chunk_angles[best_idx_chunk]
+                best_map_final = heatmaps[best_idx_chunk].squeeze().cpu().numpy()
+        
+        if best_map_final is None: return -1, -1, 0, 0, None
 
-    scores_c, _ = get_scores(angles_coarse)
-    best_c_idx = torch.argmax(scores_c).item()
-    best_c_angle = angles_coarse[best_c_idx]
-    
-    # Debug: print scores for first sample
-    # print(f"Coarse Scores: {scores_c.cpu().numpy()}")
+        px, py, _ = find_peak_subpixel(best_map_final)
+        return px, py, best_angle, best_overall_score, best_map_final
 
-    # 2. Fine Search (+/- 10 deg in 1 deg steps)
-    angles_fine = np.arange(best_c_angle - 10, best_c_angle + 11, 1)
-    angles_fine = np.mod(angles_fine, 360)
-    
-    scores_f, heatmaps_f = get_scores(angles_fine)
-    best_f_idx = torch.argmax(scores_f).item()
-    best_f_angle = angles_fine[best_f_idx]
-    best_conf = scores_f[best_f_idx].item()
-    
-    # print(f"Best Fine Angle: {best_f_angle}, Conf: {best_conf}")
-    
-    best_map = heatmaps_f[best_f_idx].squeeze().cpu().numpy()
-    px, py, _ = find_peak_subpixel(best_map)
-    
-    return px, py, best_f_angle, best_conf, best_map
+    else:
+        # 1. Coarse Search (5 deg steps)
+        angles_coarse = np.arange(0, 360, 5)
+        
+        def get_scores(target_angles):
+            batch_t = []
+            for a in target_angles:
+                batch_t.append(TF.rotate(template_tensor, -float(a), interpolation=TF.InterpolationMode.BILINEAR))
+            batch_t = torch.stack(batch_t).squeeze(1).to(device)
+            batch_q = query_tensor.repeat(len(target_angles), 1, 1, 1).to(device)
+            with torch.no_grad():
+                logits = model(batch_t, batch_q)
+                heatmaps = torch.sigmoid(logits)
+            scores = heatmaps.view(len(target_angles), -1).max(dim=1).values
+            return scores, heatmaps
 
-def evaluate_model(num_samples=200):
+        scores_c, _ = get_scores(angles_coarse)
+        best_c_idx = torch.argmax(scores_c).item()
+        best_c_angle = angles_coarse[best_c_idx]
+
+        # 2. Fine Search (+/- 10 deg in 1 deg steps)
+        angles_fine = np.arange(best_c_angle - 10, best_c_angle + 11, 1)
+        angles_fine = np.mod(angles_fine, 360)
+        
+        scores_f, heatmaps_f = get_scores(angles_fine)
+        best_f_idx = torch.argmax(scores_f).item()
+        best_f_angle = angles_fine[best_f_idx]
+        best_conf = scores_f[best_f_idx].item()
+        
+        best_map = heatmaps_f[best_f_idx].squeeze().cpu().numpy()
+        px, py, _ = find_peak_subpixel(best_map)
+        
+        return px, py, best_f_angle, best_conf, best_map
+
+def evaluate_model(num_samples=200, dense=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SiameseUNet(n_channels=1).to(device)
     
     if not os.path.exists(MODEL_PATH):
-        print("Model not found.")
+        print(f"Model {MODEL_PATH} not found.")
         return
 
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
@@ -100,11 +135,12 @@ def evaluate_model(num_samples=200):
     correct_trans_1 = 0
     correct_trans_05 = 0
 
-    print(f"Starting evaluation over {num_samples} samples...")
+    print(f"Starting evaluation over {num_samples} samples (Dense={dense})...")
 
     for i in range(num_samples):
         # Generate complex polygons (3-10 sides)
         points_base = create_random_polygon(3, 10, (int(IMG_SIZE*0.15), int(IMG_SIZE*0.3)), center)
+        num_sides = len(points_base)
         
         gt_angle = np.random.uniform(0, 360)
         gt_tx = np.random.uniform(-30, 30)
@@ -130,7 +166,7 @@ def evaluate_model(num_samples=200):
         dist = np.exp(-0.05 * dist) 
         t_temp = torch.from_numpy(dist).float().unsqueeze(0).unsqueeze(0).to(device)
 
-        px, py, pa, conf, best_map = predict_pose_search(model, t_temp, t_query, device)
+        px, py, pa, conf, best_map = predict_pose_search(model, t_temp, t_query, device, dense=dense)
         
         pred_tx = px - IMG_SIZE//2
         pred_ty = py - IMG_SIZE//2
@@ -139,18 +175,23 @@ def evaluate_model(num_samples=200):
         if angle_err > 180: angle_err = 360 - angle_err
         
         trans_err = np.sqrt((pred_tx - gt_tx)**2 + (pred_ty - gt_ty)**2)
-
-        if i < 10:
-            print(f"Sample {i}: GT Ang={gt_angle:.1f}, Pred Ang={pa:.1f}, Err={angle_err:.1f} | GT Pos=({gt_tx:.1f}, {gt_ty:.1f}), Pred Pos=({pred_tx:.1f}, {pred_ty:.1f}), Err={trans_err:.2f} | Conf={conf:.3f}")
         
         rot_errors.append(angle_err)
         trans_errors.append(trans_err)
+        
+        is_symmetry_candidate = False
+        if angle_err > 150: # Close to 180 error
+             is_symmetry_candidate = True
         
         if angle_err < 10: correct_rot_10 += 1
         if angle_err < 2:  correct_rot_2 += 1
         if trans_err < 1.0: correct_trans_1 += 1
         if trans_err < 0.5: correct_trans_05 += 1
         
+        if angle_err > 10 or is_symmetry_candidate:
+             sym_tag = " [SYM?]" if is_symmetry_candidate else ""
+             print(f"FAIL: Sides={num_sides} | GT Ang={gt_angle:.1f}, Pred Ang={pa:.1f}, Err={angle_err:.1f}{sym_tag} | ErrTx={trans_err:.2f} | Conf={conf:.3f}")
+
         if i == 0:
             # Save a sample heatmap
             heatmap_img = (best_map * 255).astype(np.uint8)
@@ -165,4 +206,7 @@ def evaluate_model(num_samples=200):
     print(f"Translation Accuracy (<0.5 px): {correct_trans_05/num_samples*100:.1f}%")
 
 if __name__ == "__main__":
-    evaluate_model(200)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dense', action='store_true', help='Use dense 1-degree search')
+    args = parser.parse_args()
+    evaluate_model(200, dense=args.dense)

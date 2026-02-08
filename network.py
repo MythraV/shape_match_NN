@@ -48,28 +48,28 @@ class SiameseUNet(nn.Module):
         super(SiameseUNet, self).__init__()
         
         # --- Query Encoder ---
-        self.inc_q = DoubleConv(n_channels, 32)
-        self.down1_q = Down(32, 64)
-        self.down2_q = Down(64, 128)
-        self.down3_q = Down(128, 256)
-        self.down4_q = Down(256, 512) 
+        self.inc_q = DoubleConv(n_channels, 64)
+        self.down1_q = Down(64, 128)
+        self.down2_q = Down(128, 256)
+        self.down3_q = Down(256, 512)
+        self.down4_q = Down(512, 1024) 
 
         # --- Template Encoder ---
-        self.inc_t = DoubleConv(n_channels, 16)
-        self.down1_t = Down(16, 32)
-        self.down2_t = Down(32, 64)
-        self.down3_t = Down(64, 128)
-        self.down4_t = Down(128, 256)
+        self.inc_t = DoubleConv(n_channels, 64)
+        self.down1_t = Down(64, 128)
+        self.down2_t = Down(128, 256)
+        self.down3_t = Down(256, 512)
+        self.down4_t = Down(512, 1024)
 
         # --- Bottleneck ---
-        self.bottleneck_conv = DoubleConv(512 + 256, 512)
+        self.bottleneck_conv = DoubleConv(1024 + 1024, 1024)
         
         # --- Decoder ---
-        self.up1 = Up(512 + 256, 256) 
-        self.up2 = Up(256 + 128, 128)
-        self.up3 = Up(128 + 64, 64)
-        self.up4 = Up(64 + 32, 32)
-        self.outc = nn.Conv2d(32, 1, kernel_size=1)
+        self.up1 = Up(1024 + 512, 512) 
+        self.up2 = Up(512 + 256, 256)
+        self.up3 = Up(256 + 128, 128)
+        self.up4 = Up(128 + 64, 64)
+        self.outc = nn.Conv2d(64, 1, kernel_size=1)
 
     def forward(self, template, query):
         # 1. Encode Query
