@@ -6,6 +6,29 @@ import cv2
 # Import helpers
 from generate_polygon_dataset import create_random_polygon, apply_affine_transform
 
+class ShapeMatchingDatasetPrecomputed(Dataset):
+    def __init__(self, pt_file_path):
+        print(f"Loading dataset from {pt_file_path}...")
+        data = torch.load(pt_file_path)
+        self.templates = data['templates'] # Float32
+        self.queries = data['queries']     # Uint8
+        self.targets = data['targets']     # Float32
+        print(f"Loaded {len(self.templates)} samples.")
+        
+    def __len__(self):
+        return len(self.templates)
+
+    def __getitem__(self, idx):
+        # Template is already float32 (distance field)
+        template = self.templates[idx]
+        
+        # Query is uint8, need to normalize to [0, 1] float32
+        query = self.queries[idx].float() / 255.0
+        
+        target = self.targets[idx]
+        
+        return template, query, target
+
 class ShapeMatchingDatasetSimple(Dataset):
     def __init__(self, image_size=128, length=2000):
         self.img_size = image_size

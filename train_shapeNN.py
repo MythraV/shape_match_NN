@@ -2,41 +2,27 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 import os
 import csv
 import time
 import datetime
+import subprocess
 
-from shape_dataset import ShapeMatchingDatasetSimple
+from shape_dataset import ShapeMatchingDatasetSimple, ShapeMatchingDatasetPrecomputed
 from network import SiameseUNet
 from generate_polygon_dataset import generate_heatmap_target
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 32          
+BATCH_SIZE = 64 # Increased due to AMP
 LEARNING_RATE = 2e-4
 EPOCHS = 50
 IMG_SIZE = 128
-DATASET_LEN = 30000
+DATASET_SIZE = 100000
 LOSS_SCALE = 100.0
 
-def seed_worker_train(worker_id):
-    # Training: Time-based randomness for infinite variety
-    seed = (int(time.time() * 1000) + worker_id) % 2**32
-    np.random.seed(seed)
-
-def seed_worker_fixed(worker_id):
-    # Validation/Test: Fixed deterministic seed
-    # We add worker_id to ensure workers don't generate identical batches
-    seed = (42 + worker_id) % 2**32
-    np.random.seed(seed)
-
-def seed_worker_test(worker_id):
-    # Test: Different fixed deterministic seed
-    seed = (12345 + worker_id) % 2**32
-    np.random.seed(seed)
-
-def evaluate(model, loader, device, description="Eval"):
+def evaluate(model, loader, device, desc="Eval"):
     model.eval()
     total_loss = 0.0
     steps = 0
@@ -46,156 +32,149 @@ def evaluate(model, loader, device, description="Eval"):
             query = query.to(device)
             targets_vector = targets_vector.to(device)
             
-            raw_heatmaps = generate_heatmap_target(
-                batch_size=template.size(0),
-                img_size=IMG_SIZE,
-                targets=targets_vector[:, 0:2], 
-                device=device,
-                sigma=2.0
-            )
-            match_flag = targets_vector[:, 2].view(-1, 1, 1, 1)
-            final_targets = raw_heatmaps * match_flag
-            
-            pred_logits = model(template, query)
-            pred_heatmap = torch.sigmoid(pred_logits)
-            
-            diff = (pred_heatmap - final_targets) ** 2
-            weights = 1.0 + (50.0 * final_targets)
-            loss = (diff * weights).mean() * LOSS_SCALE
+            # AMP not strictly needed for eval but good for consistency
+            with autocast(enabled=True):
+                raw_heatmaps = generate_heatmap_target(
+                    batch_size=template.size(0),
+                    img_size=IMG_SIZE,
+                    targets=targets_vector[:, 0:2], 
+                    device=device,
+                    sigma=2.0
+                )
+                match_flag = targets_vector[:, 2].view(-1, 1, 1, 1)
+                final_targets = raw_heatmaps * match_flag
+                
+                pred_logits = model(template, query)
+                pred_heatmap = torch.sigmoid(pred_logits)
+                
+                diff = (pred_heatmap - final_targets) ** 2
+                weights = 1.0 + (50.0 * final_targets)
+                loss = (diff * weights).mean() * LOSS_SCALE
+                
             total_loss += loss.item()
             steps += 1
-            
-            # Limit evaluation to 100 batches to save time if dataset is huge
-            if steps >= 100:
-                break
-                
+            if steps >= 100: break
     return total_loss / steps
 
 def train_unet():
-    print(f"--- Starting Discriminative Training on {DEVICE} ---")
+    print(f"--- Starting Optimized Training on {DEVICE} ---")
     
-    # 1. Training Loader (Infinite/Random)
-    train_dataset = ShapeMatchingDatasetSimple(image_size=IMG_SIZE, length=DATASET_LEN)
+    # Optimizations
+    torch.backends.cudnn.benchmark = True
+    
+    # 1. Dataset Preparation
+    train_pt = "train_data.pt"
+    if not os.path.exists(train_pt):
+        print(f"Pre-computed dataset {train_pt} not found. Generating...")
+        cmd = ["python", "generate_static_dataset.py", "--size", str(DATASET_SIZE), "--out", train_pt]
+        subprocess.check_call(cmd)
+    
+    # Load entire dataset into RAM (CPU)
+    # Pinned memory helps transfer speed
+    train_dataset = ShapeMatchingDatasetPrecomputed(train_pt)
     train_loader = DataLoader(
         train_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=4,
-        worker_init_fn=seed_worker_train
+        num_workers=4, 
+        pin_memory=True
     )
-
-    # 2. Validation Loader (Fixed Seed 42) - "Unseen 1"
-    val_dataset = ShapeMatchingDatasetSimple(image_size=IMG_SIZE, length=2000)
+    
+    # Generate Validation set separately
+    val_pt = "val_data.pt"
+    if not os.path.exists(val_pt):
+        print("Generating validation set...")
+        cmd = ["python", "generate_static_dataset.py", "--size", "5000", "--out", val_pt]
+        subprocess.check_call(cmd)
+        
+    val_dataset = ShapeMatchingDatasetPrecomputed(val_pt)
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=BATCH_SIZE, 
-        shuffle=False, 
-        num_workers=4,
-        worker_init_fn=seed_worker_fixed
-    )
-
-    # 3. Test Loader (Fixed Seed 12345) - "Unseen 2"
-    # To verify if Val set is weird
-    test_dataset = ShapeMatchingDatasetSimple(image_size=IMG_SIZE, length=2000)
-    test_loader = DataLoader(
-        test_dataset,
+        val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        worker_init_fn=seed_worker_test
+        num_workers=2,
+        pin_memory=True
     )
 
     model = SiameseUNet(n_channels=1).to(DEVICE)
-    if os.path.exists("siamese_unet.pth"):
-        print("Loading existing checkpoint...")
-        try:
-            model.load_state_dict(torch.load("siamese_unet.pth", map_location=DEVICE))
-        except:
-            print("Checkpoint incompatible, starting fresh.")
-        
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
-    
+    scaler = GradScaler() # For AMP
+
     log_file = "training_log.csv"
-    log_exists = os.path.exists(log_file)
-    csv_file = open(log_file, "a", newline="")
-    log_writer = csv.writer(csv_file)
-    if not log_exists:
-        log_writer.writerow(["timestamp", "epoch", "train_loss", "train_eval_loss", "val_loss", "test_loss", "lr"])
+    if not os.path.exists(log_file):
+        with open(log_file, "w", newline="") as f:
+            csv.writer(f).writerow(["timestamp", "epoch", "train_loss", "val_loss", "lr"])
 
     best_loss = float('inf')
-    patience_counter = 0
-    patience_limit = 5
-
+    patience = 0
+    
     for epoch in range(EPOCHS):
         model.train()
         running_loss = 0.0
         
+        # Tqdm helps monitor speed per batch in real-time if running interactively,
+        # but for logs we use print.
+        start_time = time.time()
+        
         for batch_idx, (template, query, targets_vector) in enumerate(train_loader):
-            template = template.to(DEVICE)
-            query = query.to(DEVICE)
-            targets_vector = targets_vector.to(DEVICE)
+            template = template.to(DEVICE, non_blocking=True)
+            query = query.to(DEVICE, non_blocking=True)
+            targets_vector = targets_vector.to(DEVICE, non_blocking=True)
 
-            raw_heatmaps = generate_heatmap_target(
-                batch_size=template.size(0),
-                img_size=IMG_SIZE,
-                targets=targets_vector[:, 0:2], 
-                device=DEVICE,
-                sigma=2.0 
-            )
-            
-            match_flag = targets_vector[:, 2].view(-1, 1, 1, 1)
-            final_targets = raw_heatmaps * match_flag
+            with autocast(enabled=True):
+                raw_heatmaps = generate_heatmap_target(
+                    batch_size=template.size(0),
+                    img_size=IMG_SIZE,
+                    targets=targets_vector[:, 0:2], 
+                    device=DEVICE,
+                    sigma=2.0
+                )
+                match_flag = targets_vector[:, 2].view(-1, 1, 1, 1)
+                final_targets = raw_heatmaps * match_flag
+
+                pred_logits = model(template, query)
+                pred_heatmap = torch.sigmoid(pred_logits)
+
+                diff = (pred_heatmap - final_targets) ** 2
+                weights = 1.0 + (50.0 * final_targets)
+                loss = (diff * weights).mean() * LOSS_SCALE
 
             optimizer.zero_grad()
-            pred_logits = model(template, query)
-            pred_heatmap = torch.sigmoid(pred_logits)
-
-            diff = (pred_heatmap - final_targets) ** 2
-            weights = 1.0 + (50.0 * final_targets)
-            loss = (diff * weights).mean() * LOSS_SCALE
-
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item()
             
             if batch_idx % 200 == 0 and batch_idx > 0:
-                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                print(f"[{timestamp}] E[{epoch+1}] Step[{batch_idx}] | Loss: {loss.item():.6f}")
+                ts = datetime.datetime.now().strftime('%H:%M:%S')
+                print(f"[{ts}] E[{epoch+1}] Step[{batch_idx}] | Loss: {loss.item():.4f}")
 
         epoch_loss = running_loss / len(train_loader)
+        epoch_time = time.time() - start_time
         
-        # --- Evaluation Phase ---
-        print(f"Evaluating Epoch {epoch+1}...")
-        
-        train_eval_loss = evaluate(model, train_loader, DEVICE, "Train Eval")
-        val_loss = evaluate(model, val_loader, DEVICE, "Validation")
-        test_loss = evaluate(model, test_loader, DEVICE, "Test")
-        
-        current_lr = optimizer.param_groups[0]['lr']
+        # Eval
+        val_loss = evaluate(model, val_loader, DEVICE)
         scheduler.step(val_loss)
         
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{timestamp}] ==> Ep {epoch+1} | Train: {epoch_loss:.4f} | TrEval: {train_eval_loss:.4f} | Val: {val_loss:.4f} | Test: {test_loss:.4f} | LR: {current_lr:.2e}")
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        lr = optimizer.param_groups[0]['lr']
+        print(f"[{ts}] Ep {epoch+1} ({epoch_time:.1f}s) | Train: {epoch_loss:.4f} | Val: {val_loss:.4f} | LR: {lr:.2e}")
         
-        log_writer.writerow([timestamp, epoch + 1, epoch_loss, train_eval_loss, val_loss, test_loss, current_lr])
-        csv_file.flush()
+        with open(log_file, "a", newline="") as f:
+            csv.writer(f).writerow([ts, epoch+1, epoch_loss, val_loss, lr])
 
         if val_loss < best_loss:
             best_loss = val_loss
-            patience_counter = 0
+            patience = 0
             torch.save(model.state_dict(), "siamese_unet.pth")
             print(f"Saved Best Model (Val: {best_loss:.4f})")
         else:
-            patience_counter += 1
-            print(f"No improvement. Patience: {patience_counter}/{patience_limit}")
-            if patience_counter >= patience_limit:
-                print("Early stopping triggered.")
+            patience += 1
+            if patience >= 5:
+                print("Early stopping.")
                 break
-
-    csv_file.close()
-    print(f"--- Training Complete ---")
 
 if __name__ == "__main__":
     train_unet()
