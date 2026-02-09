@@ -158,7 +158,7 @@ def train_unet(train_path, val_path, output_dir):
 
             running_loss += loss.item()
             
-            if batch_idx % 200 == 0 and batch_idx > 0:
+            if batch_idx % 50 == 0 and batch_idx > 0:
                 ts = datetime.datetime.now().strftime('%H:%M:%S')
                 print(f"[{ts}] E[{epoch+1}] Step[{batch_idx}] | Loss: {loss.item():.4f}")
 
