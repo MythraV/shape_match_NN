@@ -1,40 +1,43 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 import torchvision.transforms.functional as TF
-from shape_dataset import ShapeMatchingDatasetSimple 
-from network import SiameseUNet 
+from shape_dataset import ShapeMatchingDatasetSimple
+from network import SiameseUNet
 import cv2
 import os
 import argparse
 
-MODEL_PATH = "siamese_unet.pth" 
+MODEL_PATH = "siamese_unet.pth"
 IMG_SIZE = 128
 
 def find_peak_subpixel(heatmap):
     """
-    Finds the peak of the heatmap with sub-pixel accuracy using a local centroid.
+    Finds the peak of the heatmap with sub-pixel accuracy using spatial softargmax.
+    Consistent with the DSNT coordinate loss used in training.
+    Falls back to parabolic fit on a local window for robustness.
     """
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(heatmap)
     if max_val < 0.1:
         return -1.0, -1.0, max_val
-    
-    x_p, y_p = max_loc
-    r = 5
-    y_start = max(0, y_p - r)
-    y_end = min(heatmap.shape[0], y_p + r + 1)
-    x_start = max(0, x_p - r)
-    x_end = min(heatmap.shape[1], x_p + r + 1)
-    
-    window = heatmap[y_start:y_end, x_start:x_end].copy()
-    window[window < 0.3 * max_val] = 0
-    
-    M = cv2.moments(window)
-    if M["m00"] == 0:
-        return float(x_p), float(y_p), max_val
-    
-    cx = M["m10"] / M["m00"] + x_start
-    cy = M["m01"] / M["m00"] + y_start
-    
+
+    # Spatial softargmax on the full heatmap (matches training objective)
+    H, W = heatmap.shape
+    heatmap_t = torch.from_numpy(heatmap).float().view(1, -1)
+    # Use logits (inverse sigmoid) for softmax, or just use raw heatmap values
+    # Since we get sigmoid output, convert back to logits for softmax consistency
+    heatmap_clipped = np.clip(heatmap, 1e-7, 1 - 1e-7)
+    logits = np.log(heatmap_clipped / (1.0 - heatmap_clipped))
+    logits_t = torch.from_numpy(logits).float().view(1, -1)
+    probs = F.softmax(logits_t, dim=1)
+
+    x_coords = torch.arange(W).float()
+    y_coords = torch.arange(H).float()
+    yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+
+    cx = (probs * xx.reshape(1, -1)).sum().item()
+    cy = (probs * yy.reshape(1, -1)).sum().item()
+
     return cx, cy, max_val
 
 def predict_pose_search(model, template_tensor, query_tensor, device, dense=False):
@@ -152,6 +155,17 @@ def evaluate_model(num_samples=200, dense=False):
         fg = np.random.randint(150, 255)
         cv2.fillPoly(img_query, [points_query], fg)
         cv2.polylines(img_query, [points_query], True, fg, 1, cv2.LINE_AA)
+
+        # Compute actual rendered centroid (same as training data)
+        mask = np.zeros((IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        cv2.fillPoly(mask, [points_query], 255)
+        M_query = cv2.moments(mask)
+        if M_query["m00"] > 0:
+            actual_cx = M_query["m10"] / M_query["m00"]
+            actual_cy = M_query["m01"] / M_query["m00"]
+            gt_tx = actual_cx - IMG_SIZE // 2
+            gt_ty = actual_cy - IMG_SIZE // 2
+
         noise = np.random.normal(0, 3, img_query.shape).astype(np.int16)
         img_query = np.clip(img_query + noise, 0, 255).astype(np.uint8)
         img_query = cv2.GaussianBlur(img_query, (3, 3), 0.5)

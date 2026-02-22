@@ -28,8 +28,8 @@ def generate_single_sample(img_size):
     if is_match:
         template_angle = query_angle + np.random.uniform(-5, 5)
     else:
-        # 30% Hard Negative
-        if np.random.rand() < 0.3:
+        # 50% Hard Negative (180 deg flip) to break symmetry ambiguity
+        if np.random.rand() < 0.5:
             offset = 180 + np.random.uniform(-20, 20)
         else:
             offset = np.random.uniform(10, 350)
@@ -61,20 +61,28 @@ def generate_single_sample(img_size):
         fg = np.random.randint(120, 255)
         cv2.fillPoly(img_query, [points_query], fg)
         cv2.polylines(img_query, [points_query], True, fg, 1, cv2.LINE_AA)
-    
+
     noise = np.random.normal(0, 5, img_query.shape).astype(np.int16)
     img_query = np.clip(img_query + noise, 0, 255).astype(np.uint8)
     img_query = cv2.GaussianBlur(img_query, (3, 3), 0.5)
 
-    # 7. Targets
+    # 7. Targets — use actual rendered centroid to eliminate integer quantization noise
     if is_match:
-        # Normalize targets to [-1, 1] relative to center? 
-        # The training code expects: target_tx = tx / (img_size/2)
-        # But wait, generate_heatmap_target uses raw range? 
-        # Let's check ShapeMatchingDatasetSimple in shape_dataset.py
-        # It does: target_tx = tx / (self.img_size / 2.0)
-        target_tx = tx / (img_size / 2.0)
-        target_ty = ty / (img_size / 2.0)
+        # Compute actual centroid of the rendered polygon shape
+        # Create a binary mask of the filled polygon (before noise/blur)
+        mask = np.zeros((img_size, img_size), dtype=np.uint8)
+        if len(points_query) > 0:
+            cv2.fillPoly(mask, [points_query], 255)
+        M = cv2.moments(mask)
+        if M["m00"] > 0:
+            actual_cx = M["m10"] / M["m00"]
+            actual_cy = M["m01"] / M["m00"]
+        else:
+            actual_cx = center[0] + tx
+            actual_cy = center[1] + ty
+        # Normalize relative to canvas center to [-1, 1]
+        target_tx = (actual_cx - center[0]) / (img_size / 2.0)
+        target_ty = (actual_cy - center[1]) / (img_size / 2.0)
         targets = np.array([target_tx, target_ty, 1.0], dtype=np.float32)
     else:
         targets = np.array([0.0, 0.0, 0.0], dtype=np.float32)

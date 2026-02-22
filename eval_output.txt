@@ -1,0 +1,9 @@
+Starting evaluation over 200 samples (Dense=True)...
+
+--- Results ---
+Avg Rotation Error:    2.54 deg
+Avg Translation Error: 0.07 px
+Rotation Accuracy (<10 deg): 100.0%
+Rotation Accuracy (<2 deg):  40.5%
+Translation Accuracy (<1.0 px): 99.5%
+Translation Accuracy (<0.5 px): 99.5%

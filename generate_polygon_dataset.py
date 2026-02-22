@@ -41,22 +41,19 @@ def apply_affine_transform(vertices, rotation_deg, scale, translate_xy, canvas_c
 
 def generate_heatmap_target(batch_size, img_size, targets, device, sigma=2.0):
     """
-    Generates Gaussian heatmaps centered at targets.
-    targets: [tx, ty] normalized [-1, 1]
+    Generates Gaussian heatmaps centered at targets (vectorized).
+    targets: (B, 2) normalized [-1, 1]
+    Returns: (B, 1, H, W)
     """
     x = torch.arange(0, img_size, device=device).float()
     y = torch.arange(0, img_size, device=device).float()
-    yy, xx = torch.meshgrid(y, x, indexing='ij')
+    yy, xx = torch.meshgrid(y, x, indexing='ij')  # (H, W)
 
-    heatmap_batch = []
     center = img_size / 2.0
-    
-    for i in range(batch_size):
-        px = center + targets[i, 0] * center
-        py = center + targets[i, 1] * center
-        
-        dist_sq = (xx - px)**2 + (yy - py)**2
-        heatmap = torch.exp(-dist_sq / (2.0 * sigma**2))
-        heatmap_batch.append(heatmap)
-        
-    return torch.stack(heatmap_batch).unsqueeze(1) # (B, 1, H, W)
+    px = (center + targets[:, 0] * center).view(-1, 1, 1)  # (B, 1, 1)
+    py = (center + targets[:, 1] * center).view(-1, 1, 1)  # (B, 1, 1)
+
+    dist_sq = (xx.unsqueeze(0) - px)**2 + (yy.unsqueeze(0) - py)**2
+    heatmaps = torch.exp(-dist_sq / (2.0 * sigma**2))
+
+    return heatmaps.unsqueeze(1)  # (B, 1, H, W)
